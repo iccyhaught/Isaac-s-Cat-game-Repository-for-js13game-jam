@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Cat Paw Yarn – Leaderboard Build</title>
+<style>
+body { margin: 0; overflow: hidden; display: flex; justify-content: center; align-items: flex-start; height: 100vh; background: #222; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+canvas { display: block; }
+
+/* UI overlay */
+#ui { position: absolute; top: 10px; left: 10px; z-index: 1000; color: white; user-select: none; }
+#scoreDisplay { font-size: 18px; margin-bottom: 6px; }
+#usernameInput { font-size: 16px; padding: 6px 8px; margin-bottom: 6px; border: 1px solid rgba(255,255,255,0.2); background: rgba(0,0,0,0.3); color: white; border-radius: 6px; outline: none; width: 220px; }
+#timerDisplay { font-size: 16px; margin-bottom: 8px; }
+#leaderboardChart { font-size: 13px; max-width: 320px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.15); border-radius: 8px; padding: 8px; }
+#leaderboardChart b { display: block; margin-bottom: 6px; }
+.row { display: flex; align-items: center; gap: 6px; margin: 3px 0; }
+.name { min-width: 90px; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.barWrap { flex: 1; height: 10px; background: rgba(255,255,255,0.12); border-radius: 6px; overflow: hidden; }
+.bar { height: 100%; background: linear-gradient(90deg, #7ee8fa, #eec0c6); width: 0%; transition: width 300ms ease; }
+.val { min-width: 40px; text-align: right; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="scoreDisplay">Score: 0</div>
+  <input id="usernameInput" type="text" placeholder="Enter your name" />
+  <div id="timerDisplay">Time: 30</div>
+  <div id="leaderboardChart"><b>Top Scores:</b><div>(loading...)</div></div>
+</div>
+<canvas id="c"></canvas>
+
+<script>
+// ===== Base Setup =====
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+function resizeCanvas(){ canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+resizeCanvas();
+window.addEventListener("resize", resizeCanvas);
+let W = canvas.width, H = canvas.height;
+let frameCounter = 0;
+
+// ===== Yarn properties =====
+let yarn = { x: W/2, y: 100, r: 14, t: 0, moving: false, from: null, to: null, arcH: 120, speed: 0.02, targetPaw: null, falling: false, firstLaunch: true, squashT: 0, squashDur: 12, spin: 0, spinVel: 0 };
+
+// ===== Game state =====
+let state = "start", score = 0, hi = +localStorage.hi || 0, expr = "neutral", expTimer = 0;
+
+// ===== Paws =====
+let pawOffset = 100;
+let pawL = { x: W/2 - pawOffset, y: H-160, angle: 0, swing: 60, active:false, timer:0, maxTimer:15, squashT:0, squashDur:12, initY:H-160, vy:0 };
+let pawR = { x: W/2 + pawOffset, y: H-160, angle: 0, swing:-60, active:false, timer:0, maxTimer:15, squashT:0, squashDur:12, initY:H-160, vy:0 };
+
+// ===== Cat squash/stretch =====
+let catSquashT=0, catSquashDur=12;
+
+// ===== Timing windows =====
+const hitWindow = 0.2;
+const sweetSpot = 0.1;
+
+// ===== Particles & feedback =====
+let particles = [], feedbacks = [], confetti = [], rainConfetti = [];
+
+// ===== Streak / Countdown =====
+let streak = 0; 
+let countdown = 30;
+
+// ===== Leaderboard =====
+const GAS_URL = "https://script.google.com/macros/s/AKfycbxVqUxSOAJ6AGVnRhR0RIMPwhF_x9Ymr9slVShKNWzyURLkC_KkZxeqlXLhluHYzmiG/exec";
+let leaderboardData = [];
+let leaderboardSubmitted = false;
+
+// ===== Reset =====
+function reset(){
+  yarn.x = pawL.x; yarn.y = pawL.y - 50; yarn.moving=false; yarn.from=null; yarn.to=null; yarn.t=0; yarn.targetPaw=null; yarn.falling=false; yarn.firstLaunch=true; yarn.squashT=0; yarn.spin=0; yarn.spinVel=0;
+  score=0; state="start"; expr="neutral"; expTimer=0; streak=0; countdown=30; leaderboardSubmitted=false;
+  pawL.y = pawL.initY; pawR.y = pawR.initY; pawL.vy=0; pawR.vy=0; pawL.angle=0; pawR.angle=0;
+  particles=[]; feedbacks=[]; confetti=[]; rainConfetti=[];
+}
+
+// ===== Start =====
+function startGame(){ if(state==="start") state="play"; }
+
+// ===== Controls =====
+onkeydown = e => {
+  if(state==="over" && e.key===" ") reset();
+  if(state==="play" || state==="start"){
+    if(e.key==="ArrowLeft"){ pawL.active=true; pawL.timer=pawL.maxTimer; startGame(); triggerPaw(pawL,true); }
+    if(e.key==="ArrowRight"){ pawR.active=true; pawR.timer=pawR.maxTimer; startGame(); triggerPaw(pawR,true); }
+  }
+};
+
+// ===== Trigger Paw =====
+function triggerPaw(paw, first=false){
+  paw.squashT = paw.squashDur; paw.vy = -12;
+  if(first && yarn.firstLaunch){ launchYarn(paw); yarn.firstLaunch=false; return; }
+  tryHitPaw(paw);
+}
+
+// ===== Hit Detection =====
+function tryHitPaw(paw){
+  if(!yarn.moving || yarn.falling || yarn.targetPaw!==paw) return;
+  let t=yarn.t;
+  if(t>=1-hitWindow && t<=1+hitWindow){
+    let delta = Math.abs(t-1.0);
+    let fbColor="red", fbText="Bad!";
+    if(delta<=sweetSpot/2){
+      streak += 1; score += 3 + streak; expr="happy";
+      if(streak>=5){ fbColor="#0ff"; fbText="Amazing!"; }
+      else { fbColor="yellow"; fbText="Perfect!"; }
+      createParticles(yarn.x,yarn.y,fbColor);
+      createFeedback(yarn.x,yarn.y,fbText,fbColor);
+      if(streak>=10){ createConfetti(); createRainConfetti(); }
+    } else { streak = 0; score += 1; expr="red"; createParticles(yarn.x,yarn.y,"red"); createFeedback(yarn.x,yarn.y,"Bad!","red"); }
+    expTimer=30; if(score>hi){ hi=score; localStorage.hi=hi; }
+    yarn.squashT = yarn.squashDur; yarn.spinVel = 0.6 + Math.random()*0.4; catSquashT = catSquashDur;
+    launchYarn(paw);
+  }
+}
+
+// ===== Launch Yarn =====
+function launchYarn(fromPaw){
+  let toPaw = (fromPaw===pawL) ? pawR : pawL;
+  yarn.from = {x:yarn.x, y:yarn.y};
+  yarn.to = {x:toPaw.x, y:toPaw.y-50};
+  yarn.t=0; yarn.moving=true; yarn.falling=false; yarn.targetPaw=toPaw;
+  yarn.arcH = 80 + Math.random()*80; yarn.speed = 0.015 + Math.random()*0.01;
+}
+
+// ===== Particles / Feedback =====
+function createParticles(x,y,color){ for(let i=0;i<15;i++){ particles.push({ x, y, vx:(Math.random()-0.5)*6, vy:(Math.random()-0.5)*-6, life:15, maxLife:15, color }); } }
+function createFeedback(x,y,text,color){ feedbacks.push({x,y,text,color,life:30}); }
+function createConfetti(){ for(let i=0;i<30;i++){ confetti.push({ x: yarn.x + Math.random()*20 - 10, y: yarn.y + Math.random()*20 - 10, vx: (Math.random()-0.5)*6, vy: (Math.random()-0.5)*-6, life: 60, maxLife: 60, color: `hsl(${Math.random()*360},80%,60%)` }); } }
+function createRainConfetti(){ for(let i=0;i<40;i++){ rainConfetti.push({ x: Math.random()*W, y: 0, vx: (Math.random()-0.5)*2, vy: Math.random()*1 + 0.5, life: 220, maxLife: 220, color: `hsl(${Math.random()*360},80%,60%)` }); } }
+
+// ===== Draw Window =====
+const windowWidth = 300;
+const windowHeight = 400;
+const windowX = W - windowWidth - 50; // Right side
+const windowY = 50;
+let cloudOffset = 0;
+
+function drawWindow(){
+  // Frame
+  ctx.fillStyle = "#654321"; // brown
+  ctx.fillRect(windowX-8, windowY-8, windowWidth+16, windowHeight+16);
+  
+  // Glass
+  ctx.fillStyle = "#88ccff";
+  ctx.fillRect(windowX, windowY, windowWidth, windowHeight);
+  
+  // Panes (2x2)
+  ctx.strokeStyle = "#654321";
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(windowX + windowWidth/2, windowY);
+  ctx.lineTo(windowX + windowWidth/2, windowY + windowHeight);
+  ctx.moveTo(windowX, windowY + windowHeight/2);
+  ctx.lineTo(windowX + windowWidth, windowY + windowHeight/2);
+  ctx.stroke();
+  
+  // Clouds behind glass
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(windowX, windowY, windowWidth, windowHeight);
+  ctx.clip();
+  cloudOffset -= 0.5; // scroll left
+  for(let i=0;i<5;i++){
+    const cx = windowX + (i*150 + cloudOffset)% (windowWidth+150) - 50;
+    const cy = windowY + 50 + i*30;
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 30, 0, Math.PI*2);
+    ctx.arc(cx+25, cy+5, 25, 0, Math.PI*2);
+    ctx.arc(cx-20, cy+10, 20, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// ===== Draw Cat =====
+function drawCat(){ 
+  let sx=1, sy=1; if(catSquashT>0){ const k=catSquashT/catSquashDur; const e=Math.sin(k*Math.PI*0.5); sx=1+0.15*e; sy=1-0.1*e; catSquashT--; }
+  ctx.save(); ctx.translate(W/2,H-140); ctx.scale(sx,sy); ctx.fillStyle="black"; ctx.beginPath(); ctx.arc(0,0,50,0,Math.PI*2); ctx.fill();
+  // ears
+  ctx.beginPath(); ctx.moveTo(-50,-20); ctx.lineTo(-25,-60); ctx.lineTo(0,-20); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(50,-20); ctx.lineTo(25,-60); ctx.lineTo(0,-20); ctx.fill();
+  // whiskers
+  ctx.strokeStyle="white";
+  for(let i=-1;i<=1;i+=2){ ctx.beginPath(); ctx.moveTo(i*20,-10); ctx.lineTo(i*55,-15); ctx.stroke(); ctx.beginPath(); ctx.moveTo(i*20,0); ctx.lineTo(i*55,0); ctx.stroke(); ctx.beginPath(); ctx.moveTo(i*20,10); ctx.lineTo(i*55,15); ctx.stroke(); }
+  // nose + mouth
+  ctx.fillStyle="pink"; ctx.beginPath(); ctx.arc(0,5,5,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle="white"; ctx.beginPath(); ctx.moveTo(0,15); ctx.lineTo(0,20); ctx.stroke();
+  // eyes + expressions
+  ctx.fillStyle="white";
+  if(expr==="neutral"){ ctx.beginPath(); ctx.arc(-20,-10,6,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(20,-10,6,0,Math.PI*2); ctx.fill(); }
+  if(expr==="happy"){ ctx.beginPath(); ctx.arc(-20,-10,6,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(20,-10,6,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(0,15,15,0,Math.PI); ctx.stroke(); }
+  if(expr==="red"){ ctx.beginPath(); ctx.arc(-20,-10,6,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(20,-10,6,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(0,15,7,0,Math.PI*2); ctx.stroke(); }
+  ctx.restore();
+}
+
+// ===== Draw Paw =====
+function drawPaw(paw){
+  paw.y += paw.vy; paw.vy += 2; if(paw.y>paw.initY){ paw.y=paw.initY; paw.vy=0; }
+  let sx=1, sy=1; if(paw.squashT>0){ const k=paw.squashT/paw.squashDur; const e=Math.sin(k*Math.PI*0.5); sx=1+0.6*e; sy=1-0.4*e; paw.squashT--; }
+  ctx.save(); ctx.translate(paw.x,paw.y); ctx.rotate(paw.angle*Math.PI/180); ctx.scale(sx,sy); ctx.fillStyle="black"; ctx.fillRect(-10,-30,20,40);
+  ctx.beginPath(); ctx.arc(0,-30,10,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(0,10,10,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle="pink"; ctx.beginPath(); ctx.ellipse(0,2,7,9,0,0,Math.PI*2); ctx.fill();
+  const beanY=-22; const beanX=[-8,0,8]; for(let i=0;i<3;i++){ ctx.beginPath(); ctx.arc(beanX[i],beanY,3,0,Math.PI*2); ctx.fill(); }
+  ctx.restore();
+}
+
+// ===== Draw Yarn =====
+function drawYarn(){
+  let sx=1, sy=1; if(yarn.squashT>0){ const k=yarn.squashT/yarn.squashDur; const e=Math.sin(k*Math.PI*0.5); sx=1+0.5*e; sy=1-0.3*e; yarn.squashT--; }
+  yarn.spin += yarn.spinVel; yarn.spinVel *= 0.95;
+  if(yarn.from){ ctx.strokeStyle="#ffaaaa"; ctx.beginPath(); ctx.moveTo(yarn.from.x,yarn.from.y); const cx=(yarn.from.x+yarn.x)/2; const cy=Math.min(yarn.from.y,yarn.y)-20; ctx.quadraticCurveTo(cx,cy,yarn.x,yarn.y); ctx.stroke(); }
+  ctx.save(); ctx.translate(yarn.x,yarn.y); ctx.rotate(yarn.spin); ctx.scale(sx,sy);
+  ctx.shadowBlur = (streak>=5)?15:0; ctx.shadowColor="#0ff"; ctx.fillStyle="red"; ctx.beginPath(); ctx.arc(0,0,yarn.r,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle="#ffaaaa"; for(let i=0;i<4;i++){ ctx.beginPath(); ctx.arc(0,0,yarn.r-i*3,0,Math.PI*2); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(0,yarn.r); ctx.lineTo(0,yarn.r+25); ctx.stroke();
+  ctx.restore(); ctx.shadowBlur=0;
+}
+
+// ===== Particle Updates/Draw =====
+function updateParticles(){ for(let i=particles.length-1;i>=0;i--){ let p=particles[i]; p.x+=p.vx; p.y+=p.vy; p.life--; if(p.life<=0) particles.splice(i,1); } }
+function updateFeedbacks(){ for(let i=feedbacks.length-1;i>=0;i--){ let f=feedbacks[i]; f.y-=0.5; f.life--; if(f.life<=0) feedbacks.splice(i,1); } }
+function updateConfetti(){ for(let i=confetti.length-1;i>=0;i--){ let f=confetti[i]; f.x+=f.vx; f.y+=f.vy; f.vy+=0.2; f.life--; if(f.life<=0) confetti.splice(i,1); } }
+function updateRainConfetti(){ for(let i=rainConfetti.length-1;i>=0;i--){ let r=rainConfetti[i]; r.x+=r.vx; r.y+=r.vy; r.vy+=0.02; r.life--; if(r.life<=0) rainConfetti.splice(i,1); } }
+function drawParticles(){ particles.forEach(p=>{ ctx.fillStyle=p.color; ctx.globalAlpha=p.life/p.maxLife; ctx.beginPath(); ctx.arc(p.x,p.y,2,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; }); }
+function drawFeedbacks(){ feedbacks.forEach(f=>{ ctx.fillStyle=f.color; ctx.globalAlpha=f.life/30; ctx.font="16px sans-serif"; ctx.fillText(f.text,f.x,f.y); ctx.globalAlpha=1; }); }
+function drawConfetti(){ confetti.forEach(f=>{ ctx.fillStyle=f.color; ctx.globalAlpha=f.life/f.maxLife; ctx.beginPath(); ctx.arc(f.x,f.y,4,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; }); }
+function drawRainConfetti(){ rainConfetti.forEach(r=>{ ctx.fillStyle=r.color; ctx.globalAlpha=r.life/r.maxLife; ctx.fillRect(r.x,r.y,5,5); ctx.globalAlpha=1; }); }
+
+// ===== Leaderboard =====
+const usernameInput = document.getElementById("usernameInput");
+const leaderboardChart = document.getElementById("leaderboardChart");
+
+async function submitScore(){
+  const name = (usernameInput.value || "Anonymous").trim();
+  try{ await fetch(`${GAS_URL}?name=${encodeURIComponent(name)}&score=${encodeURIComponent(score)}`,{method:"GET",mode:"cors"}); fetchLeaderboard(); }
+  catch(e){ console.log("Submit error:",e); }
+}
+
+async function fetchLeaderboard(){
+  try{
+    const res = await fetch(`${GAS_URL}?top`,{method:"GET",mode:"cors"});
+    const data = await res.json();
+    leaderboardData = Array.isArray(data)?data:[];
+    renderLeaderboardChart(leaderboardData);
+  }catch(e){ console.log("Leaderboard fetch error:",e); }
+}
+
+function renderLeaderboardChart(rows){
+  if(!rows || !rows.length){ leaderboardChart.innerHTML="<b>Top Scores:</b><div>(no scores yet)</div>"; return; }
+  const top = rows.slice(0,10); const maxScore = Math.max(...top.map(r=>Number(r.score)||0),1);
+  let html="<b>Top Scores:</b>";
+  top.forEach((r,i)=>{ const s=Number(r.score)||0; const w=Math.max(4,Math.round((s/maxScore)*100));
+    html += `<div class="row"><div class="name">${i+1}. ${escapeHtml(r.name||"Anon")}</div><div class="barWrap"><div class="bar" style="width:${w}%;"></div></div><div class="val">${s}</div></div>`;
+  });
+  leaderboardChart.innerHTML=html;
+}
+
+function escapeHtml(str){ return String(str).replace(/[&<>"']/g, s=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#039;"}[s])); }
+setInterval(fetchLeaderboard,15000);
+
+// ===== Main Loop =====
+function loop(){
+  frameCounter++; W=canvas.width; H=canvas.height;
+  pawL.x=W/2-pawOffset; pawR.x=W/2+pawOffset;
+
+  // Background
+  ctx.fillStyle="#222"; ctx.fillRect(0,0,W,H);
+
+  // Draw window behind everything else
+  drawWindow();
+
+  updateParticles(); updateFeedbacks(); updateConfetti(); updateRainConfetti();
+
+  if(state==="start"){
+    drawCat(); drawPaw(pawL); drawPaw(pawR); drawYarn();
+    drawParticles(); drawFeedbacks(); drawConfetti(); drawRainConfetti();
+    ctx.fillStyle="white"; ctx.font="20px sans-serif"; ctx.fillText("Use Left/Right arrows to swing paws",W/2,H/2);
+  }
+
+  if(state==="play"){
+    if(countdown>0 || streak>0) countdown -= 1/60;
+    if(countdown<=0 && streak===0){ state="over"; }
+
+    // Yarn motion
+    if(yarn.moving && !yarn.falling){
+      yarn.t += yarn.speed; const t=yarn.t, arcH=yarn.arcH;
+      const x0=yarn.from.x, y0=yarn.from.y, x1=yarn.to.x, y1=yarn.to.y;
+      yarn.x=x0+(x1-x0)*t; yarn.y=y0+(y1-y0)*t + 4*arcH*(t-0.5)*(t-0.5)-arcH;
+      if(t>1+hitWindow){ yarn.moving=false; yarn.x=x1; yarn.y=y1; yarn.falling=true; streak=0; createFeedback(yarn.x,yarn.y,"Miss!","gray"); fetchLeaderboard(); }
+    }
+    if(yarn.falling){ yarn.y+=5; if(yarn.y>H) state="over"; }
+
+    // Paw rotations
+    if(pawL.active){ pawL.angle=pawL.swing*(pawL.timer/pawL.maxTimer); pawL.timer--; if(pawL.timer<=0){ pawL.angle=0; pawL.active=false; } }
+    if(pawR.active){ pawR.angle=pawR.swing*(pawR.timer/pawR.maxTimer); pawR.timer--; if(pawR.timer<=0){ pawR.angle=0; pawR.active=false; } }
+
+    drawCat(); drawPaw(pawL); drawPaw(pawR); drawYarn();
+    drawParticles(); drawFeedbacks(); drawConfetti(); drawRainConfetti();
+
+    ctx.fillStyle="white"; ctx.font="20px sans-serif"; ctx.textAlign="left";
+    ctx.fillText("Score:"+score,10,30); ctx.fillText("Hi:"+hi,W-100,30);
+    ctx.textAlign="center"; let streakText = (countdown<=0 && streak>0)?"OVERTIME STREAK:"+streak:"Streak:"+streak;
+    ctx.fillText(streakText,W/2,H-60); ctx.fillText("Time:"+Math.ceil(countdown),W/2,50); ctx.textAlign="left";
+
+    if(expTimer>0) expTimer--; else expr="neutral";
+  }
+
+  if(state==="over"){
+    if(!leaderboardSubmitted){ leaderboardSubmitted=true; submitScore(); }
+    ctx.fillStyle="white"; ctx.font="20px sans-serif"; ctx.textAlign="center";
+    ctx.fillText("Game Over!",W/2,H/2-30); ctx.fillText("Score: "+score,W/2,H/2); ctx.fillText("High: "+hi,W/2,H/2+30); ctx.fillText("Press SPACE to Restart",W/2,H/2+70);
+    ctx.textAlign="left";
+    drawParticles(); drawFeedbacks(); drawConfetti(); drawRainConfetti();
+  }
+
+  // Sync UI
+  document.getElementById("scoreDisplay").textContent = "Score: " + score;
+  document.getElementById("timerDisplay").textContent = "Time: " + Math.max(0, Math.ceil(countdown));
+
+  requestAnimationFrame(loop);
+}
+
+// ===== Init =====
+reset(); loop(); fetchLeaderboard();
+</script>
+</body>
+</html>
